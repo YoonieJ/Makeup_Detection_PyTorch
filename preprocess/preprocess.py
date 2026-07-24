@@ -130,7 +130,7 @@ def build_manifest(loader_outputs: list) -> pd.DataFrame:
                                        # will be namespaced with source below to guarantee
                                        # global uniqueness across datasets
             "label": int,             # 1 = makeup, 0 = no makeup
-            "source": str,            # e.g. "ymu", "miw", "kaggle_mvnm", "tapakah68"
+            "source": str,            # e.g. "kaggle_mvnm", "tapakah68"
         }
 
     Returns a DataFrame with an added 'identity_key' column (source + person_id)
@@ -251,21 +251,6 @@ def preprocess_dataset(df: pd.DataFrame, processed_root: Path = PROCESSED_ROOT) 
 
 # Dataset loaders -- STUBS. Fill these in once folder structures are confirmed.
 
-def load_ymu(root: Path) -> list:
-    """
-    TODO: implement once YMU folder structure is confirmed.
-    Must return list of dicts: {"image_path", "person_id", "label", "source": "ymu"}
-    """
-    raise NotImplementedError("Provide YMU folder structure to implement this loader.")
-
-
-def load_miw(root: Path) -> list:
-    """
-    TODO: implement once MIW folder structure is confirmed.
-    Must return list of dicts: {"image_path", "person_id", "label", "source": "miw"}
-    """
-    raise NotImplementedError("Provide MIW folder structure to implement this loader.")
-
 
 def load_kaggle_makeup_vs_nonmakeup(root: Path) -> list:
     """
@@ -291,8 +276,6 @@ def load_tapakah68(root: Path) -> list:
 
 if __name__ == "__main__":
     loader_outputs = [
-        load_ymu(RAW_DATA_ROOT / "ymu"),
-        load_miw(RAW_DATA_ROOT / "miw"),
         load_kaggle_makeup_vs_nonmakeup(RAW_DATA_ROOT / "kaggle_mvnm"),
         load_tapakah68(RAW_DATA_ROOT / "tapakah68"),
     ]
