@@ -115,9 +115,7 @@ def detect_and_crop_face(image_path: str, out_size: int = IMAGE_SIZE, margin: fl
     return crop_resized
 
 
-# ---------------------------------------------------------------------------
 # Manifest construction
-# ---------------------------------------------------------------------------
 
 def build_manifest(loader_outputs: list) -> pd.DataFrame:
     """
