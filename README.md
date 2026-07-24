@@ -7,6 +7,8 @@ full-glam images vs. very natural/subtle makeup. Trained model deployed as a rea
 
 - **Task**: binary classification, `makeup` (1) vs `no_makeup` (0).
 - **Datasets**:
+  Download both datasets directly from Kaggle and place the extracted files under
+  the expected `data/raw/` paths. Raw dataset files are not tracked in Git.
   - petersunga
     ["Make-up vs No Make-up"](https://www.kaggle.com/datasets/petersunga/make-up-vs-no-make-up):
     larger, high-resolution makeup/no-makeup images. These are class examples,
