@@ -36,20 +36,20 @@ not before/after shots of the same people.
 ## Pipeline stages
 
 1. **Loaders** (`load_kaggle_makeup_vs_nonmakeup`, `load_tapakah68` in
-   `preprocess.py`) — dataset-specific, convert each source's
+   `preprocess.py`): dataset-specific, convert each source's
    raw folder structure into a common record format:
    `{"image_path", "person_id", "label", "source"}`.
-   *Currently stubbed* — need actual folder/filename structure of each downloaded
+   *Currently stubbed*: need actual folder/filename structure of each downloaded
    dataset before these can be implemented correctly.
-2. **`build_manifest()`** — merges all loader outputs into a single DataFrame,
+2. **`build_manifest()`**: merges all loader outputs into a single DataFrame,
    namespaces `person_id` by source to prevent cross-dataset ID collisions.
-3. **`split_by_identity()`** — group-aware train/val/test split (70/15/15 default),
+3. **`split_by_identity()`**: group-aware train/val/test split (70/15/15 default),
    with leakage assertions.
-4. **`preprocess_dataset()`** — face detection, eye-line alignment, tight crop
+4. **`preprocess_dataset()`**: face detection, eye-line alignment, tight crop
    (MediaPipe FaceMesh), resize to 224×224, saved to
    `data/processed/<split>/<makeup|no_makeup>/`. Images with no detectable face
    are logged and dropped.
-5. **`manifest.csv`** — final combined record of every processed image: source,
+5. **`manifest.csv`**: final combined record of every processed image: source,
    person_id, label, split, processed_path.
 
 ## Setup
@@ -62,7 +62,7 @@ OR
 pip3 install mediapipe opencv-python pandas scikit-learn torch torchvision
 ```
 
-Note: install and test locally — mediapipe/torch wheels for Apple Silicon should
+Note: install and test locally. Mediapipe/torch wheels for Apple Silicon should
 install cleanly via pip on M5 Pro, but hasn't been verified in this environment.
 
 ## Directory layout expected
@@ -92,9 +92,9 @@ on completion.
 - [ ] Treat petersunga as unpaired class data and tapakah68 as paired
       before/after identity data in the manifest.
 - [ ] After first run: check `[WARNING] Face detection failed on N images` output
-      — high failure counts may indicate image quality issues or an unusually
+      because high failure counts may indicate image quality issues or an unusually
       posed dataset needing a different detection confidence threshold.
-- [ ] Once combined dataset sizes are known, revisit the 70/15/15 split ratio —
+- [ ] Once combined dataset sizes are known, revisit the 70/15/15 split ratio,
       small per-dataset identity counts may need a different ratio or stratification
       strategy.
 - [ ] Model training script (not yet started).
