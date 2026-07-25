@@ -252,29 +252,58 @@ def preprocess_dataset(df: pd.DataFrame, processed_root: Path = PROCESSED_ROOT) 
 
 def load_kaggle_makeup_vs_nonmakeup(root: Path) -> list:
     """
-    TODO: implement once this Kaggle dataset's folder structure is confirmed.
-    NOTE: if this dataset is NOT identity-paired (different people in each class),
-    person_id should be a unique per-image placeholder (e.g. the filename itself),
-    since there's no real identity to group on -- confirm this before implementing.
+    petersunga "Make-up vs No Make-up" dataset: root/makeup/*.jpeg and
+    root/no_makeup/*.jpeg. Unpaired class data (no shared identities between
+    or within classes), so person_id is just the image's own filename stem.
     Must return list of dicts: {"image_path", "person_id", "label", "source": "kaggle_mvnm"}
     """
-    raise NotImplementedError("Provide dataset folder structure to implement this loader.")
+    records = []
+    for label, subdir in ((1, "makeup"), (0, "no_makeup")):
+        for image_path in sorted((root / subdir).iterdir()):
+            if not image_path.is_file():
+                continue
+            records.append({
+                "image_path": str(image_path),
+                "person_id": image_path.stem,
+                "label": label,
+                "source": "kaggle_mvnm",
+            })
+    return records
 
 
 def load_tapakah68(root: Path) -> list:
     """
-    TODO: implement using the no_makeup/ and with_makeup/ folder structure
-    (matched by filename) plus the accompanying .csv, per the HF dataset card.
+    tapakah68 "Makeup Detection Face Dataset": root/make_up.csv lists one row
+    per person with matched no_makeup/with_makeup relative paths. Paired
+    before/after data, so person_id is shared between the two rows emitted
+    per person (here, the CSV row index).
     Must return list of dicts: {"image_path", "person_id", "label", "source": "tapakah68"}
     """
-    raise NotImplementedError("Provide tapakah68 folder structure to implement this loader.")
+    df = pd.read_csv(root / "make_up.csv")
+
+    records = []
+    for idx, row in df.iterrows():
+        person_id = str(idx)
+        records.append({
+            "image_path": str(root / row["no_makeup"]),
+            "person_id": person_id,
+            "label": 0,
+            "source": "tapakah68",
+        })
+        records.append({
+            "image_path": str(root / row["with_makeup"]),
+            "person_id": person_id,
+            "label": 1,
+            "source": "tapakah68",
+        })
+    return records
 
 
 # Main
 
 if __name__ == "__main__":
     loader_outputs = [
-        load_kaggle_makeup_vs_nonmakeup(RAW_DATA_ROOT / "kaggle_mvnm"),
+        load_kaggle_makeup_vs_nonmakeup(RAW_DATA_ROOT / "petersunga"),
         load_tapakah68(RAW_DATA_ROOT / "tapakah68"),
     ]
 

@@ -1,0 +1,14 @@
+# mediapipe must stay in 0.10.13-0.10.21: 0.10.30+ dropped the legacy
+# mediapipe.solutions API (incl. face_mesh) that detect_and_crop_face() uses.
+mediapipe==0.10.21
+
+# Use opencv-contrib-python only -- installing opencv-python alongside it
+# clobbers shared files under site-packages/cv2 and breaks the cv2 import.
+opencv-contrib-python==4.11.0.86
+
+numpy==1.26.4
+pandas==3.0.5
+scikit-learn==1.9.0
+
+torch==2.13.0
+torchvision==0.28.0
