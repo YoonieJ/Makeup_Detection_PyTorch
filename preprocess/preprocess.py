@@ -311,7 +311,7 @@ def preprocess_dataset(df: pd.DataFrame, processed_root: Path = PROCESSED_ROOT) 
     return df
 
 
-# Dataset loaders -- STUBS. Fill these in once folder structures are confirmed.
+# Dataset loaders
 
 
 def load_kaggle_makeup_vs_nonmakeup(root: Path) -> list:
@@ -393,7 +393,6 @@ def load_tapakah68(root: Path) -> list:
 
 if __name__ == "__main__":
     loader_outputs = [
-        load_kaggle_makeup_vs_nonmakeup(RAW_DATA_ROOT / "petersunga"),
         load_kaggle_makeup_vs_nonmakeup(RAW_DATA_ROOT / "petersunga"),
         load_tapakah68(RAW_DATA_ROOT / "tapakah68"),
     ]
