@@ -19,7 +19,8 @@ full-glam images vs. very natural/subtle makeup. Trained model deployed as a rea
     makeup.
 - **Target platform**: MacBook Pro (Apple Silicon, M5 Pro).
 - **Framework**: PyTorch (MPS backend for training/inference on-device).
-- **Real-time deployment**: webcam frame → face detect/crop → classify → label overlay.
+- **Real-time deployment**: webcam frame → face detect/crop → classify → label overlay
+  (`webcam_inference.py`).
 
 ## Why identity-based splitting matters here
 
@@ -36,131 +37,74 @@ not before/after shots of the same people.
 ## Pipeline stages
 
 1. **Loaders** (`load_kaggle_makeup_vs_nonmakeup`, `load_tapakah68` in
-   `preprocess.py`): dataset-specific, convert each source's
+   `preprocess/preprocess.py`): dataset-specific, convert each source's
    raw folder structure into a common record format:
    `{"image_path", "person_id", "label", "source"}`.
-   - `load_kaggle_makeup_vs_nonmakeup` reads `data/raw/petersunga/{makeup,no_makeup}/*.jpeg`;
-     since these are unpaired class examples, `person_id` is just each image's
-     filename stem.
-   - `load_tapakah68` reads `data/raw/tapakah68/make_up.csv`, which pairs each
-     person's `no_makeup/N.jpg` and `with_makeup/N.jpg`; the CSV row index is
-     used as the shared `person_id` for that before/after pair.
+   *Currently stubbed*: need actual folder/filename structure of each downloaded
+   dataset before these can be implemented correctly.
 2. **`build_manifest()`**: merges all loader outputs into a single DataFrame,
    namespaces `person_id` by source to prevent cross-dataset ID collisions.
 3. **`split_by_identity()`**: group-aware train/val/test split (70/15/15 default),
    with leakage assertions.
-4. **`preprocess_dataset()`**: face detection, eye-line alignment, tight crop
-   (MediaPipe FaceMesh), resize to 224×224, saved to
-   `data/processed/<split>/<makeup|no_makeup>/`. Images with no detectable face
-   are logged and dropped.
-5. **`manifest.csv`**: final combined record of every processed image: source,
+4. **`align_and_crop_face()` / `detect_and_crop_face()`**: face detection,
+   eye-line alignment, tight crop (MediaPipe FaceMesh, falling back to Haar
+   cascades, falling back to a plain center crop), resize to 224×224.
+   `align_and_crop_face()` operates on an in-memory image array and is shared
+   with `webcam_inference.py`, so training and live inference always see
+   identical crops. `detect_and_crop_face()` is the thin disk-reading wrapper
+   used by `preprocess_dataset()`; it only drops an image (returns `None`)
+   if the file itself can't be read. A missing face never drops an image,
+   it just falls back to a center crop, so the "N images dropped" warning
+   only reflects corrupt/unreadable files, not detection quality.
+5. **`preprocess_dataset()`**: runs the above over the full manifest, saves
+   crops to `data/processed/<split>/<makeup|no_makeup>/`.
+6. **`manifest.csv`**: final combined record of every processed image: source,
    person_id, label, split, processed_path.
-6. **`train/train.py`**: fine-tunes an ImageNet-pretrained ResNet-18 on
-   `manifest.csv`, selects the best checkpoint by validation balanced
-   accuracy, and reports a final held-out test score. See Model training below.
 
 ## Setup
 
 ```bash
-pip install -r requirements.txt
+pip install mediapipe opencv-python pandas scikit-learn torch torchvision
 ```
 OR
 ```bash
-pip3 install -r requirements.txt
+pip3 install mediapipe opencv-python pandas scikit-learn torch torchvision
 ```
 
-Notes:
-- `mediapipe` must be pinned to `0.10.21` (or another `0.10.13`-`0.10.21` release).
-  Starting at `0.10.30`, mediapipe's macOS wheels dropped the legacy
-  `mediapipe.solutions` API (including `face_mesh`) in favor of a Tasks-only API,
-  so `preprocess.py`'s `detect_and_crop_face()` fails to import against newer
-  versions.
-- Install `opencv-contrib-python`, not `opencv-python` - installing both together
-  causes them to clobber each other's files in `site-packages/cv2` (they ship
-  overlapping paths under different package names) and breaks the `cv2` import.
-  `opencv-contrib-python` is a superset of `opencv-python`, so nothing is lost.
-
-Verified locally on Apple Silicon (M-series, Python 3.12, arm64): the full
-loader → manifest → identity-split → face-crop pipeline runs end-to-end with
-zero face-detection failures on a smoke-test slice of both datasets.
+Note: install and test locally. Mediapipe/torch wheels for Apple Silicon should
+install cleanly via pip on M5 Pro, but hasn't been verified in this environment.
 
 ## Directory layout expected
 
 ```
 data/
   raw/
-    petersunga/       # petersunga "Make-up vs No Make-up" (makeup/, no_makeup/)
-    tapakah68/         # tapakah68 "Makeup Detection Face Dataset" (make_up.csv, no_makeup/, with_makeup/)
+    kaggle_mvnm/      # petersunga "Make-up vs No Make-up"
+    tapakah68/        # tapakah68 "Makeup Detection Face Dataset"
   processed/        # generated by preprocess.py
   manifest.csv       # generated by preprocess.py
-train/
-  checkpoints/
-    best.pt           # generated by train.py
 ```
 
 ## Usage
 
+**1. Preprocess** builds the manifest and face-cropped image set:
 ```bash
 python preprocess/preprocess.py
 ```
-
 Prints a train/val/test x label count breakdown and writes `data/manifest.csv`
 on completion.
 
-```bash
-python train/train.py
-```
-
-Requires `data/manifest.csv` (run preprocessing first). Prints per-epoch
-train/val loss and balanced accuracy, saves the best checkpoint to
-`train/checkpoints/best.pt`, and prints a final test-set score using that
-checkpoint.
-
-## Model training
-
-`train/train.py` fine-tunes an ImageNet-pretrained ResNet-18 end-to-end:
-
-- **Loss**: `BCEWithLogitsLoss` with `pos_weight` computed from the train
-  split's class ratio - the combined manifest skews ~69% makeup / 31%
-  no_makeup (inherited from petersunga), so this keeps the loss from just
-  learning to predict "makeup" for everything.
-- **Augmentation**: random horizontal flip, mild color jitter, small rotation.
-- **Model selection**: best checkpoint by validation balanced accuracy, with
-  early stopping (patience 6 epochs).
-
-### Baseline results (first run)
-
-| | balanced accuracy | F1 |
-|---|---|---|
-| Val (best, epoch 3 of 9) | 0.813 | 0.840 |
-| Test | 0.772 | 0.811 |
-
-Training overfits past epoch 3 (train balanced accuracy reaches 0.98 by
-epoch 9 while val degrades), which is expected when fully fine-tuning
-ResNet-18 on ~1000 train images - early stopping caught it. This is a working
-baseline, not a tuned final model. Next levers to try: freeze more of the
-backbone (e.g. train only `layer4` + `fc`), or stronger/more augmentation.
-
 ## Status / open items
 
-- [x] Confirm folder/filename structure for Kaggle Makeup-vs-Non-Makeup and
+- [ ] Confirm folder/filename structure for Kaggle Makeup-vs-Non-Makeup and
       tapakah68 → implement the two loader functions.
-- [x] Treat petersunga as unpaired class data and tapakah68 as paired
+- [ ] Treat petersunga as unpaired class data and tapakah68 as paired
       before/after identity data in the manifest.
-- [x] Pin `mediapipe==0.10.21` and use `opencv-contrib-python` (see Setup) so
-      `detect_and_crop_face()` (legacy `mediapipe.solutions.face_mesh` API)
-      actually imports and runs on Apple Silicon/Python 3.12 - newer mediapipe
-      releases dropped that API, and `opencv-python` + `opencv-contrib-python`
-      installed together break the `cv2` import.
-- [x] After first run: check `[WARNING] Face detection failed on N images` output
+- [ ] After first run: check `[WARNING] Face detection failed on N images` output
       because high failure counts may indicate image quality issues or an unusually
       posed dataset needing a different detection confidence threshold.
-      63/1558 images failed (4.0%), all from petersunga; tapakah68 had zero
-      failures. Acceptable as-is.
 - [ ] Once combined dataset sizes are known, revisit the 70/15/15 split ratio,
       small per-dataset identity counts may need a different ratio or stratification
-      strategy. tapakah68 has only 26 identities, so val/test carry very few of
-      them (~4 each) - still an open question, not yet revisited.
-- [x] Model training script - `train/train.py`, see Model training above.
-      Baseline works but overfits past epoch 3; not yet tuned.
+      strategy.
+- [ ] Model training script (not yet started).
 - [ ] Real-time webcam inference script (not yet started).

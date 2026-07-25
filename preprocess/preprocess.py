@@ -16,9 +16,17 @@ import os
 import cv2
 import numpy as np
 import pandas as pd
-import mediapipe as mp
 from pathlib import Path
 from sklearn.model_selection import GroupShuffleSplit
+
+# Optional MediaPipe support. If the installed package does not expose the
+# legacy `mp.solutions` API, we fall back to OpenCV Haar cascades.
+try:
+    import mediapipe as mp
+    if not hasattr(mp, "solutions"):
+        mp = None
+except Exception:
+    mp = None
 
 # Config
 
@@ -35,84 +43,140 @@ VAL_FRAC = 0.15
 TEST_FRAC = 0.15            # must sum to 1.0 with the above
 
 # Face detection + alignment
+FACE_CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+EYE_CASCADE_PATH = cv2.data.haarcascades + "haarcascade_eye.xml"
+_face_cascade = cv2.CascadeClassifier(FACE_CASCADE_PATH)
+_eye_cascade = cv2.CascadeClassifier(EYE_CASCADE_PATH)
+_cascades_available = not _face_cascade.empty() and not _eye_cascade.empty()
 
-_mp_face_mesh = mp.solutions.face_mesh.FaceMesh(
-    static_image_mode=True,
-    max_num_faces=1,
-    refine_landmarks=False,
-    min_detection_confidence=0.5,
-)
-
-# MediaPipe FaceMesh landmark indices for the outer corners of each eye.
-# Used to compute the roll angle for alignment.
 LEFT_EYE_OUTER = 33
 RIGHT_EYE_OUTER = 263
+
+if mp is not None:
+    try:
+        _mp_face_mesh = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=True,
+            max_num_faces=1,
+            refine_landmarks=False,
+            min_detection_confidence=0.5,
+        )
+    except Exception:
+        _mp_face_mesh = None
+else:
+    _mp_face_mesh = None
+
+
+def align_and_crop_face(img: np.ndarray, out_size: int = IMAGE_SIZE, margin: float = FACE_MARGIN) -> np.ndarray:
+    """
+    Detect the face in an already-loaded BGR image, rotate to align the eyes
+    horizontally, crop tightly to the face (excluding most hair/background),
+    and resize. Always returns a crop: falls back to Haar cascades, then to
+    a plain center crop, if no face landmarks are found.
+
+    Shared by preprocess_dataset() (reading from disk) and the webcam
+    inference script (reading live frames), so training and inference see
+    identical crops.
+    """
+    h, w = img.shape[:2]
+    if _mp_face_mesh is not None:
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        result = _mp_face_mesh.process(rgb)
+
+        if result and result.multi_face_landmarks:
+            landmarks = result.multi_face_landmarks[0].landmark
+
+            # Pixel coords of eye corners for alignment
+            left_eye = np.array([landmarks[LEFT_EYE_OUTER].x * w, landmarks[LEFT_EYE_OUTER].y * h])
+            right_eye = np.array([landmarks[RIGHT_EYE_OUTER].x * w, landmarks[RIGHT_EYE_OUTER].y * h])
+
+            dy = right_eye[1] - left_eye[1]
+            dx = right_eye[0] - left_eye[0]
+            angle = np.degrees(np.arctan2(dy, dx))
+
+            eyes_center = ((left_eye[0] + right_eye[0]) / 2, (left_eye[1] + right_eye[1]) / 2)
+            rot_mat = cv2.getRotationMatrix2D(eyes_center, angle, 1.0)
+            rotated = cv2.warpAffine(img, rot_mat, (w, h), flags=cv2.INTER_LINEAR)
+
+            rgb_rot = cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB)
+            result_rot = _mp_face_mesh.process(rgb_rot)
+            if result_rot and result_rot.multi_face_landmarks:
+                landmarks_rot = result_rot.multi_face_landmarks[0].landmark
+                xs = [lm.x * w for lm in landmarks_rot]
+                ys = [lm.y * h for lm in landmarks_rot]
+                x_min, x_max = min(xs), max(xs)
+                y_min, y_max = min(ys), max(ys)
+
+                box_w = x_max - x_min
+                box_h = y_max - y_min
+                pad_w = box_w * margin
+                pad_h = box_h * margin
+
+                x1 = max(int(x_min - pad_w), 0)
+                y1 = max(int(y_min - pad_h), 0)
+                x2 = min(int(x_max + pad_w), w)
+                y2 = min(int(y_max + pad_h), h)
+
+                if x2 > x1 and y2 > y1:
+                    crop = rotated[y1:y2, x1:x2]
+                    return cv2.resize(crop, (out_size, out_size), interpolation=cv2.INTER_AREA)
+
+        # Fall back to OpenCV if MediaPipe did not detect a face
+
+    if _cascades_available:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = _face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
+        if len(faces) > 0:
+            x, y, fw, fh = max(faces, key=lambda rect: rect[2] * rect[3])
+            face_roi = gray[y : y + fh, x : x + fw]
+            eyes = _eye_cascade.detectMultiScale(face_roi, scaleFactor=1.1, minNeighbors=5, minSize=(20, 20))
+
+            angle = 0.0
+            if len(eyes) >= 2:
+                eyes = sorted(eyes, key=lambda e: e[0])[:2]
+                left_eye_center = np.array([x + eyes[0][0] + eyes[0][2] / 2.0, y + eyes[0][1] + eyes[0][3] / 2.0])
+                right_eye_center = np.array([x + eyes[1][0] + eyes[1][2] / 2.0, y + eyes[1][1] + eyes[1][3] / 2.0])
+                dy = right_eye_center[1] - left_eye_center[1]
+                dx = right_eye_center[0] - left_eye_center[0]
+                angle = np.degrees(np.arctan2(dy, dx))
+
+            eyes_center = (x + fw / 2.0, y + fh / 2.0)
+            rot_mat = cv2.getRotationMatrix2D(eyes_center, angle, 1.0)
+            rotated = cv2.warpAffine(img, rot_mat, (w, h), flags=cv2.INTER_LINEAR)
+
+            pad_w = int(fw * margin)
+            pad_h = int(fh * margin)
+            x1 = max(x - pad_w, 0)
+            y1 = max(y - pad_h, 0)
+            x2 = min(x + fw + pad_w, w)
+            y2 = min(y + fh + pad_h, h)
+
+            if x2 > x1 and y2 > y1:
+                crop = rotated[y1:y2, x1:x2]
+                return cv2.resize(crop, (out_size, out_size), interpolation=cv2.INTER_AREA)
+
+    # Fall back to a center crop if no face detection is available.
+    min_dim = min(w, h)
+    crop_size = int(min_dim * (1.0 - margin))
+    x1 = max((w - crop_size) // 2, 0)
+    y1 = max((h - crop_size) // 2, 0)
+    x2 = min(x1 + crop_size, w)
+    y2 = min(y1 + crop_size, h)
+    crop = img[y1:y2, x1:x2]
+    return cv2.resize(crop, (out_size, out_size), interpolation=cv2.INTER_AREA)
 
 
 def detect_and_crop_face(image_path: str, out_size: int = IMAGE_SIZE, margin: float = FACE_MARGIN):
     """
-    Detect the face in image_path, rotate to align the eyes horizontally,
-    crop tightly to the face (excluding most hair/background), and resize.
+    Load image_path from disk and align/crop the face via align_and_crop_face().
 
     Returns:
         aligned_crop (np.ndarray, BGR, out_size x out_size x 3) on success
-        None on failure (no face detected) -- caller should log and skip
+        None if the image cannot be read from disk -- caller should log and skip
     """
     img = cv2.imread(str(image_path))
     if img is None:
         return None
-
-    h, w = img.shape[:2]
-    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    result = _mp_face_mesh.process(rgb)
-
-    if not result.multi_face_landmarks:
-        return None
-
-    landmarks = result.multi_face_landmarks[0].landmark
-
-    # Pixel coords of eye corners for alignment
-    left_eye = np.array([landmarks[LEFT_EYE_OUTER].x * w, landmarks[LEFT_EYE_OUTER].y * h])
-    right_eye = np.array([landmarks[RIGHT_EYE_OUTER].x * w, landmarks[RIGHT_EYE_OUTER].y * h])
-
-    # Roll angle between the eyes
-    dy = right_eye[1] - left_eye[1]
-    dx = right_eye[0] - left_eye[0]
-    angle = np.degrees(np.arctan2(dy, dx))
-
-    # Rotate the full image around the midpoint between the eyes
-    eyes_center = ((left_eye[0] + right_eye[0]) / 2, (left_eye[1] + right_eye[1]) / 2)
-    rot_mat = cv2.getRotationMatrix2D(eyes_center, angle, 1.0)
-    rotated = cv2.warpAffine(img, rot_mat, (w, h), flags=cv2.INTER_LINEAR)
-
-    # Re-run landmark detection on the rotated image to get an accurate face bbox
-    rgb_rot = cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB)
-    result_rot = _mp_face_mesh.process(rgb_rot)
-    if not result_rot.multi_face_landmarks:
-        return None
-
-    landmarks_rot = result_rot.multi_face_landmarks[0].landmark
-    xs = [lm.x * w for lm in landmarks_rot]
-    ys = [lm.y * h for lm in landmarks_rot]
-    x_min, x_max = min(xs), max(xs)
-    y_min, y_max = min(ys), max(ys)
-
-    box_w = x_max - x_min
-    box_h = y_max - y_min
-    pad_w = box_w * margin
-    pad_h = box_h * margin
-
-    x1 = max(int(x_min - pad_w), 0)
-    y1 = max(int(y_min - pad_h), 0)
-    x2 = min(int(x_max + pad_w), w)
-    y2 = min(int(y_max + pad_h), h)
-
-    if x2 <= x1 or y2 <= y1:
-        return None
-
-    crop = rotated[y1:y2, x1:x2]
-    crop_resized = cv2.resize(crop, (out_size, out_size), interpolation=cv2.INTER_AREA)
-    return crop_resized
+    return align_and_crop_face(img, out_size=out_size, margin=margin)
 
 
 # Manifest construction
@@ -252,50 +316,76 @@ def preprocess_dataset(df: pd.DataFrame, processed_root: Path = PROCESSED_ROOT) 
 
 def load_kaggle_makeup_vs_nonmakeup(root: Path) -> list:
     """
-    petersunga "Make-up vs No Make-up" dataset: root/makeup/*.jpeg and
-    root/no_makeup/*.jpeg. Unpaired class data (no shared identities between
-    or within classes), so person_id is just the image's own filename stem.
-    Must return list of dicts: {"image_path", "person_id", "label", "source": "kaggle_mvnm"}
+    Load the petersunga Makeup-vs-No-Makeup dataset.
+
+    The dataset is unpaired by identity, so each image is treated as its own
+    identity for split grouping purposes.
     """
     records = []
-    for label, subdir in ((1, "makeup"), (0, "no_makeup")):
-        for image_path in sorted((root / subdir).iterdir()):
+    for label_name, label_value in [("makeup", 1), ("no_makeup", 0)]:
+        folder = root / label_name
+        if not folder.exists():
+            raise FileNotFoundError(f"Expected folder not found: {folder}")
+
+        for image_path in sorted(folder.iterdir()):
             if not image_path.is_file():
                 continue
+            if image_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".bmp"}:
+                continue
+
             records.append({
-                "image_path": str(image_path),
+                "image_path": str(image_path.resolve()),
                 "person_id": image_path.stem,
-                "label": label,
+                "label": label_value,
                 "source": "kaggle_mvnm",
             })
+
     return records
 
 
 def load_tapakah68(root: Path) -> list:
     """
-    tapakah68 "Makeup Detection Face Dataset": root/make_up.csv lists one row
-    per person with matched no_makeup/with_makeup relative paths. Paired
-    before/after data, so person_id is shared between the two rows emitted
-    per person (here, the CSV row index).
-    Must return list of dicts: {"image_path", "person_id", "label", "source": "tapakah68"}
+    Load the tapakah68 paired makeup dataset.
+
+    Each CSV row contains a matching no_makeup and with_makeup image for one person.
+    The person_id is derived from the image stem so both records share the same identity.
     """
-    df = pd.read_csv(root / "make_up.csv")
+    csv_path = root / "make_up.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Expected CSV file not found: {csv_path}")
 
     records = []
-    for idx, row in df.iterrows():
-        person_id = str(idx)
-        records.append({
-            "image_path": str(root / row["no_makeup"]),
-            "person_id": person_id,
-            "label": 0,
-            "source": "tapakah68",
-        })
-        records.append({
-            "image_path": str(root / row["with_makeup"]),
-            "person_id": person_id,
-            "label": 1,
-            "source": "tapakah68",
-        })
+    import csv
+
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            no_makeup_rel = row.get("no_makeup")
+            with_makeup_rel = row.get("with_makeup")
+            if not no_makeup_rel or not with_makeup_rel:
+                continue
+
+            no_path = (root / no_makeup_rel).resolve()
+            with_path = (root / with_makeup_rel).resolve()
+            if not no_path.exists() or not with_path.exists():
+                raise FileNotFoundError(
+                    f"Missing tapakah68 image pair: {no_path} / {with_path}"
+                )
+
+            person_id = no_path.stem
+            records.append({
+                "image_path": str(no_path),
+                "person_id": person_id,
+                "label": 0,
+                "source": "tapakah68",
+            })
+            records.append({
+                "image_path": str(with_path),
+                "person_id": person_id,
+                "label": 1,
+                "source": "tapakah68",
+            })
+
     return records
 
 
@@ -303,6 +393,7 @@ def load_tapakah68(root: Path) -> list:
 
 if __name__ == "__main__":
     loader_outputs = [
+        load_kaggle_makeup_vs_nonmakeup(RAW_DATA_ROOT / "petersunga"),
         load_kaggle_makeup_vs_nonmakeup(RAW_DATA_ROOT / "petersunga"),
         load_tapakah68(RAW_DATA_ROOT / "tapakah68"),
     ]
